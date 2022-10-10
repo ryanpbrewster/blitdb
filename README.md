@@ -1,17 +1,20 @@
-# Running an example
+# Running the server
 ```
-curl localhost:3000/v1/exec --data-binary @../data/add.wasm
+cd server && RUST_LOG=server=debug cargo run
 ```
 
+# Sending an example request
+```
+curl localhost:3000/v1/exec --data-binary @data/add.wasm
+```
 should return `2 + 2 = 4`
 
 
 # Resource Limits
-
 We use wasmtime's fuel consumption to limit resources
 
 ```
-curl localhost:3000/v1/exec --data-binary @../data/loop.wasm
+curl localhost:3000/v1/exec --data-binary @data/loop.wasm
 ```
 should error out with
 ```
