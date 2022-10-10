@@ -1,11 +1,12 @@
 use axum::{
+    body::Bytes,
     routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
-use wasmtime::{Engine, Instance, Module, Store};
+use wasmtime::{Config, Engine, Instance, Module, Store};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,18 +40,26 @@ async fn root() -> &'static str {
     "Hello, World!"
 }
 
-async fn exec(req: String) -> String {
+async fn exec(req: Bytes) -> String {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
     event!(Level::DEBUG, "got payload: {:?}", req);
 
-    let engine = Engine::default();
+    let mut conf = Config::new();
+    conf.consume_fuel(true);
+    let engine = match Engine::new(&conf) {
+        Ok(e) => e,
+        Err(e) => return format!("invalid conf: {}", e),
+    };
     let module = match Module::new(&engine, &req) {
         Ok(m) => m,
         Err(e) => return format!("error: {}", e),
     };
 
     let mut store = Store::new(&engine, 4);
+    store
+        .add_fuel(1_000)
+        .expect("store.add_fuel should never error");
 
     let instance = match Instance::new(&mut store, &module, &[]) {
         Ok(i) => i,
