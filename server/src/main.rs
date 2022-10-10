@@ -1,6 +1,5 @@
 use axum::{
-    http::StatusCode,
-    response::IntoResponse,
+    body::Bytes,
     routing::{get, post},
     Router,
 };
@@ -40,10 +39,9 @@ async fn root() -> &'static str {
     "Hello, World!"
 }
 
-// basic handler that responds with a static string
-async fn exec() -> &'static str {
+async fn exec(req: Bytes) -> &'static str {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
-    event!(Level::DEBUG, "something happened inside my_span");
+    event!(Level::DEBUG, "got payload: {:?}", req);
     "Hello, World!"
 }
