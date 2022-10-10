@@ -1,5 +1,8 @@
+use anyhow::anyhow;
 use axum::{
     body::Bytes,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -40,41 +43,46 @@ async fn root() -> &'static str {
     "Hello, World!"
 }
 
-async fn exec(req: Bytes) -> String {
+async fn exec(req: Bytes) -> AppResult<String> {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
     event!(Level::DEBUG, "got payload: {:?}", req);
 
     let mut conf = Config::new();
     conf.consume_fuel(true);
-    let engine = match Engine::new(&conf) {
-        Ok(e) => e,
-        Err(e) => return format!("invalid conf: {}", e),
-    };
-    let module = match Module::new(&engine, &req) {
-        Ok(m) => m,
-        Err(e) => return format!("error: {}", e),
-    };
+    let engine = Engine::new(&conf)?;
+    let module = Module::new(&engine, &req)?;
 
     let mut store = Store::new(&engine, 4);
-    store
-        .add_fuel(1_000)
-        .expect("store.add_fuel should never error");
+    store.add_fuel(1_000)?;
 
-    let instance = match Instance::new(&mut store, &module, &[]) {
-        Ok(i) => i,
-        Err(e) => return format!("error: {}", e),
-    };
-    let add = match instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add") {
-        Ok(h) => h,
-        Err(e) => return format!("error: {}", e),
-    };
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
 
-    // And finally we can call the wasm!
-    let output = match add.call(&mut store, (2, 2)) {
-        Ok(o) => o,
-        Err(e) => return format!("error: {}", e),
-    };
+    let output = add.call(&mut store, (2, 2))?;
 
-    format!("2 + 2 = {}", output)
+    Ok(format!("2 + 2 = {}", output))
+}
+
+enum AppError {
+    Unknown(anyhow::Error),
+}
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        match self {
+            AppError::Unknown(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }.into_response()
+    }
+}
+
+type AppResult<T> = Result<T, AppError>;
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        AppError::Unknown(e)
+    }
+}
+impl From<wasmtime::Trap> for AppError {
+    fn from(e: wasmtime::Trap) -> Self {
+        AppError::Unknown(anyhow!("wasm trap: {}", e))
+    }
 }
