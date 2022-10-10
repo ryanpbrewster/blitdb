@@ -1,11 +1,11 @@
 use axum::{
-    body::Bytes,
     routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
+use wasmtime::{Engine, Instance, Module, Store};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,9 +39,33 @@ async fn root() -> &'static str {
     "Hello, World!"
 }
 
-async fn exec(req: Bytes) -> &'static str {
+async fn exec(req: String) -> String {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
     event!(Level::DEBUG, "got payload: {:?}", req);
-    "Hello, World!"
+
+    let engine = Engine::default();
+    let module = match Module::new(&engine, &req) {
+        Ok(m) => m,
+        Err(e) => return format!("error: {}", e),
+    };
+
+    let mut store = Store::new(&engine, 4);
+
+    let instance = match Instance::new(&mut store, &module, &[]) {
+        Ok(i) => i,
+        Err(e) => return format!("error: {}", e),
+    };
+    let add = match instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add") {
+        Ok(h) => h,
+        Err(e) => return format!("error: {}", e),
+    };
+
+    // And finally we can call the wasm!
+    let output = match add.call(&mut store, (2, 2)) {
+        Ok(o) => o,
+        Err(e) => return format!("error: {}", e),
+    };
+
+    format!("2 + 2 = {}", output)
 }
