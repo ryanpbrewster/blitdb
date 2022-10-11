@@ -1,0 +1,5 @@
+build:
+	cargo build --target wasm32-unknown-unknown --release
+
+exec: build
+	curl localhost:3000/v1/exec --data-binary @target/wasm32-unknown-unknown/release/wasm.wasm

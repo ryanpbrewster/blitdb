@@ -9,7 +9,7 @@ use axum::{
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
-use wasmtime::{Config, Engine, Instance, Module, Store};
+use wasmtime::{Caller, Config, Engine, Func, Instance, Module, Store};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,17 +60,37 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let _guard = span.enter();
     event!(Level::DEBUG, "exec, payload = {:?}", req);
 
-    let module = Module::new(&state.engine, &req)?;
+    let module = {
+        let span = span!(Level::INFO, "compile");
+        let _guard = span.enter();
+        Module::new(&state.engine, &req)?
+    };
 
+    // The data here is nonsense. In the future we may want to allow host
+    // functions to manipulate host data, and I think this is how you'd do that
+    // (note that `host_log` below has access to this field as `caller.data()`).
     let mut store = Store::new(&state.engine, 4);
     store.add_fuel(1_000)?;
 
-    let instance = Instance::new(&mut store, &module, &[])?;
+    let host_log = Func::wrap(&mut store, |caller: Caller<'_, u32>, param: i32| {
+        event!(
+            Level::DEBUG,
+            "host_log({}), state = {}",
+            param,
+            caller.data()
+        );
+    });
+
+    let instance = Instance::new(&mut store, &module, &[host_log.into()])?;
     let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
 
-    let output = add.call(&mut store, (2, 2))?;
+    let output = {
+        let span = span!(Level::INFO, "call");
+        let _guard = span.enter();
+        add.call(&mut store, (3, 4))?
+    };
 
-    Ok(format!("2 + 2 = {}", output))
+    Ok(format!("3 + 4 = {}", output))
 }
 
 enum AppError {
