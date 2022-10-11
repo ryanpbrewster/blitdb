@@ -4,9 +4,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
 use wasmtime::{Config, Engine, Instance, Module, Store};
@@ -21,11 +21,19 @@ async fn main() -> anyhow::Result<()> {
         .event_format(format)
         .init();
 
+    let state = {
+        let mut conf = Config::new();
+        conf.consume_fuel(true);
+        State {
+            engine: Engine::new(&conf)?,
+        }
+    };
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
         // `GET /` goes to `root`
-        .route("/v1/exec", post(exec));
+        .route("/v1/exec", post(exec))
+        .layer(Extension(Arc::new(state)));
 
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
@@ -38,22 +46,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+struct State {
+    engine: Engine,
+}
+
 // basic handler that responds with a static string
 async fn root() -> &'static str {
     "Hello, World!"
 }
 
-async fn exec(req: Bytes) -> AppResult<String> {
+async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
-    event!(Level::DEBUG, "got payload: {:?}", req);
+    event!(Level::DEBUG, "exec, payload = {:?}", req);
 
-    let mut conf = Config::new();
-    conf.consume_fuel(true);
-    let engine = Engine::new(&conf)?;
-    let module = Module::new(&engine, &req)?;
+    let module = Module::new(&state.engine, &req)?;
 
-    let mut store = Store::new(&engine, 4);
+    let mut store = Store::new(&state.engine, 4);
     store.add_fuel(1_000)?;
 
     let instance = Instance::new(&mut store, &module, &[])?;
@@ -71,7 +80,8 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::Unknown(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        }.into_response()
+        }
+        .into_response()
     }
 }
 
