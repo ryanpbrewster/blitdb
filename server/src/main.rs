@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::{Arc, Mutex}, collections::BTreeMap};
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
 use wasmtime::{Caller, Config, Engine, Func, Instance, Module, Store};
@@ -26,12 +26,12 @@ async fn main() -> anyhow::Result<()> {
         conf.consume_fuel(true);
         State {
             engine: Engine::new(&conf)?,
+            store: Default::default(),
         }
     };
     let app = Router::new()
-        // `GET /` goes to `root`
-        .route("/", get(root))
-        // `GET /` goes to `root`
+        .route("/readyz", get(readyz))
+        .route("/livez", get(livez))
         .route("/v1/exec", post(exec))
         .layer(Extension(Arc::new(state)));
 
@@ -48,11 +48,15 @@ async fn main() -> anyhow::Result<()> {
 
 struct State {
     engine: Engine,
+    store: Mutex<BTreeMap<i32, i32>>,
 }
 
-// basic handler that responds with a static string
-async fn root() -> &'static str {
-    "Hello, World!"
+async fn readyz() -> &'static str {
+    "ok"
+}
+
+async fn livez() -> &'static str {
+    "ok"
 }
 
 async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
@@ -66,22 +70,34 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
         Module::new(&state.engine, &req)?
     };
 
-    // The data here is nonsense. In the future we may want to allow host
-    // functions to manipulate host data, and I think this is how you'd do that
-    // (note that `host_log` below has access to this field as `caller.data()`).
-    let mut store = Store::new(&state.engine, 4);
+    // The store here has access to the application-wide shared BTreeMap, so the
+    // wasmtime instance can access and modify shared state. Subsequent API
+    // calls will be able to see any modifications.
+    let mut store = Store::new(&state.engine, &state.store);
     store.add_fuel(1_000)?;
 
-    let host_log = Func::wrap(&mut store, |caller: Caller<'_, u32>, param: i32| {
+    let host_log = Func::wrap(&mut store, |caller: Caller<'_, _>, param: i32| {
         event!(
             Level::DEBUG,
-            "host_log({}), state = {}",
+            "host_log({}), state = {:?}",
             param,
             caller.data()
         );
     });
 
-    let instance = Instance::new(&mut store, &module, &[host_log.into()])?;
+    let host_increment = Func::wrap(&mut store, |caller: Caller<'_, &Mutex<BTreeMap<i32, i32>>>, param: i32| {
+        let mut store = caller.data().lock().unwrap();
+        let value = store.entry(param).or_default();
+        *value += 1;
+        event!(
+            Level::DEBUG,
+            "host_increment({}) -> {}",
+            param,
+            value,
+        );
+    });
+
+    let instance = Instance::new(&mut store, &module, &[host_log.into(), host_increment.into()])?;
     let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
 
     let output = {
