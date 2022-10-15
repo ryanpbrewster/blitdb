@@ -95,6 +95,7 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
             param,
             value,
         );
+        *value
     });
 
     let instance = Instance::new(&mut store, &module, &[host_log.into(), host_increment.into()])?;
