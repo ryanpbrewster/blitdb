@@ -8,6 +8,7 @@ use axum::{
 };
 use std::{
     collections::BTreeMap,
+    io::Read,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -125,7 +126,9 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
                 None => return 0,
                 Some(m) => m,
             };
-            let key = &memory.data(&caller)[key_ptr as usize..(key_ptr + key_len) as usize];
+
+            let key_range = key_ptr as usize..(key_ptr + key_len) as usize;
+            let key = &memory.data(&caller)[key_range];
 
             let data = caller.data().lock().unwrap();
             let value = match data.get(key) {
@@ -134,11 +137,9 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
             };
             event!(Level::DEBUG, "{:?} = {:?}", key, value);
 
-            let dst = &mut memory.data_mut(&mut caller)
-                [value_ptr as usize..(value_ptr + value_len) as usize];
-            let len = std::cmp::min(dst.len(), value.len());
-            dst[..len].copy_from_slice(&value[..len]);
-            len as u32
+            let value_range = value_ptr as usize..(value_ptr + value_len) as usize;
+            let dst = &mut memory.data_mut(&mut caller)[value_range];
+            value.as_slice().read(dst).unwrap() as u32
         },
     );
 
