@@ -78,18 +78,67 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     // wasmtime instance can access and modify shared state. Subsequent API
     // calls will be able to see any modifications.
     let mut store = Store::new(&state.engine, &state.store);
-    store.add_fuel(1_000)?;
+    store.add_fuel(1_000_000)?;
 
     let host_log = Func::wrap(
         &mut store,
         |mut caller: Caller<'_, _>, ptr: u32, len: u32| {
+            let span = span!(Level::INFO, "host_log");
+            let _guard = span.enter();
             event!(Level::DEBUG, "host_log({}, {})", ptr, len,);
-            if let Some(memory) = caller.get_export("memory") {
-                if let Some(mem) = memory.into_memory() {
-                    let x = &mem.data(&mut caller)[ptr as usize..(ptr + len) as usize];
-                    event!(Level::DEBUG, "found memory, [ptr..ptr+len] = {:?}", x);
-                }
-            }
+            let memory = match caller.get_export("memory") {
+                None => return 0,
+                Some(m) => m,
+            };
+            let memory = match memory.into_memory() {
+                None => return 0,
+                Some(m) => m,
+            };
+            let x = &memory.data(&caller)[ptr as usize..(ptr + len) as usize];
+            event!(Level::DEBUG, "{:?}", std::str::from_utf8(x));
+            1
+        },
+    );
+
+    let host_get = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, &Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
+         key_ptr: u32,
+         key_len: u32,
+         value_ptr: u32,
+         value_len: u32| {
+            let span = span!(Level::INFO, "host_get");
+            let _guard = span.enter();
+            event!(
+                Level::DEBUG,
+                "host_get({}, {}, {}, {})",
+                key_ptr,
+                key_len,
+                value_ptr,
+                value_len
+            );
+            let memory = match caller.get_export("memory") {
+                None => return 0,
+                Some(m) => m,
+            };
+            let memory = match memory.into_memory() {
+                None => return 0,
+                Some(m) => m,
+            };
+            let key = &memory.data(&caller)[key_ptr as usize..(key_ptr + key_len) as usize];
+
+            let data = caller.data().lock().unwrap();
+            let value = match data.get(key) {
+                None => return 0,
+                Some(v) => v,
+            };
+            event!(Level::DEBUG, "{:?} = {:?}", key, value);
+
+            let dst = &mut memory.data_mut(&mut caller)
+                [value_ptr as usize..(value_ptr + value_len) as usize];
+            let len = std::cmp::min(dst.len(), value.len());
+            dst[..len].copy_from_slice(&value[..len]);
+            len as u32
         },
     );
 
@@ -100,6 +149,16 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
          key_len: u32,
          value_ptr: u32,
          value_len: u32| {
+            let span = span!(Level::INFO, "host_set");
+            let _guard = span.enter();
+            event!(
+                Level::DEBUG,
+                "host_set({}, {}, {}, {})",
+                key_ptr,
+                key_len,
+                value_ptr,
+                value_len
+            );
             let memory = match caller.get_export("memory") {
                 None => return 0,
                 Some(m) => m,
@@ -108,18 +167,21 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
                 None => return 0,
                 Some(m) => m,
             };
-            let key =
-                memory.data(&mut caller)[key_ptr as usize..(key_ptr + key_len) as usize].to_vec();
-            let value = memory.data(&mut caller)
-                [value_ptr as usize..(value_ptr + value_len) as usize]
-                .to_vec();
+            let key_range = key_ptr as usize..(key_ptr + key_len) as usize;
+            let value_range = value_ptr as usize..(value_ptr + value_len) as usize;
+            let key = memory.data(&caller)[key_range].to_vec();
+            let value = memory.data(&caller)[value_range].to_vec();
             event!(Level::DEBUG, "setting {:?} = {:?}", key, value);
             caller.data().lock().unwrap().insert(key, value);
             1
         },
     );
 
-    let instance = Instance::new(&mut store, &module, &[host_log.into(), host_set.into()])?;
+    let instance = Instance::new(
+        &mut store,
+        &module,
+        &[host_log.into(), host_get.into(), host_set.into()],
+    )?;
     let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
 
     let output = {
