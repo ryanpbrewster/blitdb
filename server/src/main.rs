@@ -82,7 +82,7 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
 
     let host_log = Func::wrap(
         &mut store,
-        |mut caller: Caller<'_, _>, ptr: i32, len: i32| {
+        |mut caller: Caller<'_, _>, ptr: u32, len: u32| {
             event!(Level::DEBUG, "host_log({}, {})", ptr, len,);
             if let Some(memory) = caller.get_export("memory") {
                 if let Some(mem) = memory.into_memory() {
@@ -96,10 +96,10 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let host_set = Func::wrap(
         &mut store,
         |mut caller: Caller<'_, &Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
-         key_ptr: i32,
-         key_len: i32,
-         value_ptr: i32,
-         value_len: i32| {
+         key_ptr: u32,
+         key_len: u32,
+         value_ptr: u32,
+         value_len: u32| {
             let memory = match caller.get_export("memory") {
                 None => return 0,
                 Some(m) => m,
