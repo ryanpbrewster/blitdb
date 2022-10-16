@@ -7,11 +7,10 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn add(a: i32, b: i32) -> i32 {
     log(b"reading 'hello'");
-    let mut value = Vec::with_capacity(1024);
-    get(b"hello", &mut value);
-    log(format!("hello={:?}", &value).as_bytes());
-    value.push(b'o');
-    set(b"hello", &value);
+    let mut value = [0; 1024];
+    let n = get(b"hello", &mut value);
+    unsafe { *value.get_unchecked_mut(n) = b'o'; }
+    set(b"hello", unsafe { value.get_unchecked(..=n) });
     a + b
 }
 
@@ -27,14 +26,13 @@ fn set(key: &[u8], value: &[u8]) {
     }
 }
 
-fn get(key: &[u8], value: &mut Vec<u8>) {
+fn get(key: &[u8], value: &mut [u8]) -> usize {
     unsafe {
-        let n = host_get(
+        host_get(
             key.as_ptr(),
             key.len(),
             value.as_mut_ptr(),
-            value.capacity(),
-        );
-        value.set_len(n as usize);
-    };
+            value.len(),
+        ) as usize
+    }
 }
