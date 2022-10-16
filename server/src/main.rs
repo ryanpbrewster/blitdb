@@ -6,7 +6,11 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
-use std::{net::SocketAddr, sync::{Arc, Mutex}, collections::BTreeMap};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
 use wasmtime::{Caller, Config, Engine, Func, Instance, Module, Store};
@@ -48,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
 struct State {
     engine: Engine,
-    store: Mutex<BTreeMap<i32, i32>>,
+    store: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 async fn readyz() -> &'static str {
@@ -62,7 +66,7 @@ async fn livez() -> &'static str {
 async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let span = span!(Level::INFO, "exec");
     let _guard = span.enter();
-    event!(Level::DEBUG, "exec, payload = {:?}", req);
+    event!(Level::DEBUG, "exec, payload = {} bytes", req.len());
 
     let module = {
         let span = span!(Level::INFO, "compile");
@@ -76,29 +80,46 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let mut store = Store::new(&state.engine, &state.store);
     store.add_fuel(1_000)?;
 
-    let host_log = Func::wrap(&mut store, |caller: Caller<'_, _>, param: i32| {
-        event!(
-            Level::DEBUG,
-            "host_log({}), state = {:?}",
-            param,
-            caller.data()
-        );
-    });
+    let host_log = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, _>, ptr: i32, len: i32| {
+            event!(Level::DEBUG, "host_log({}, {})", ptr, len,);
+            if let Some(memory) = caller.get_export("memory") {
+                if let Some(mem) = memory.into_memory() {
+                    let x = &mem.data(&mut caller)[ptr as usize..(ptr + len) as usize];
+                    event!(Level::DEBUG, "found memory, [ptr..ptr+len] = {:?}", x);
+                }
+            }
+        },
+    );
 
-    let host_increment = Func::wrap(&mut store, |caller: Caller<'_, &Mutex<BTreeMap<i32, i32>>>, param: i32| {
-        let mut store = caller.data().lock().unwrap();
-        let value = store.entry(param).or_default();
-        *value += 1;
-        event!(
-            Level::DEBUG,
-            "host_increment({}) -> {}",
-            param,
-            value,
-        );
-        *value
-    });
+    let host_set = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, &Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
+         key_ptr: i32,
+         key_len: i32,
+         value_ptr: i32,
+         value_len: i32| {
+            let memory = match caller.get_export("memory") {
+                None => return 0,
+                Some(m) => m,
+            };
+            let memory = match memory.into_memory() {
+                None => return 0,
+                Some(m) => m,
+            };
+            let key =
+                memory.data(&mut caller)[key_ptr as usize..(key_ptr + key_len) as usize].to_vec();
+            let value = memory.data(&mut caller)
+                [value_ptr as usize..(value_ptr + value_len) as usize]
+                .to_vec();
+            event!(Level::DEBUG, "setting {:?} = {:?}", key, value);
+            caller.data().lock().unwrap().insert(key, value);
+            1
+        },
+    );
 
-    let instance = Instance::new(&mut store, &module, &[host_log.into(), host_increment.into()])?;
+    let instance = Instance::new(&mut store, &module, &[host_log.into(), host_set.into()])?;
     let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
 
     let output = {
