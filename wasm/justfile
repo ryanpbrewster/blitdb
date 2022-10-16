@@ -7,3 +7,6 @@ exec: build
 
 size: build
 	twiggy top -n 20 target/wasm32-unknown-unknown/release/optimized.wasm
+
+show: build
+	wasm2wat target/wasm32-unknown-unknown/release/optimized.wasm

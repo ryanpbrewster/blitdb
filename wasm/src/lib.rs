@@ -7,7 +7,7 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn add(a: i32, b: i32) -> i32 {
     log(b"reading 'hello'");
-    let mut value = [0; 1024];
+    let mut value = [0; 16];
     let n = get(b"hello", &mut value);
     unsafe { *value.get_unchecked_mut(n) = b'o'; }
     set(b"hello", unsafe { value.get_unchecked(..=n) });
