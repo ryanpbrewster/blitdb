@@ -3,14 +3,13 @@ use axum::{
     body::Bytes,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
-    Extension, Router,
+    routing::{get, post, put},
+    Extension, Router, extract::Path,
 };
 use std::{
     collections::BTreeMap,
-    io::Read,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, str::Utf8Error, num::ParseIntError,
 };
 use tracing::{event, span, Level};
 use tracing_subscriber::EnvFilter;
@@ -37,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/readyz", get(readyz))
         .route("/livez", get(livez))
+        .route("/v1/get/:key", get(get_by_key))
+        .route("/v1/set/:key", post(set_by_key))
         .route("/v1/exec", post(exec))
         .layer(Extension(Arc::new(state)));
 
@@ -53,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
 struct State {
     engine: Engine,
-    store: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
+    store: Mutex<BTreeMap<i32, i32>>,
 }
 
 async fn readyz() -> &'static str {
@@ -62,6 +63,15 @@ async fn readyz() -> &'static str {
 
 async fn livez() -> &'static str {
     "ok"
+}
+
+async fn get_by_key(state: Extension<Arc<State>>, Path(key): Path<i32>) -> AppResult<String> {
+    Ok(state.store.lock().unwrap().get(&key).cloned().unwrap_or_default().to_string())
+}
+
+async fn set_by_key(state: Extension<Arc<State>>, Path(key): Path<i32>, value: Bytes) -> AppResult<String> {
+    let v: i32 = std::str::from_utf8(&value)?.parse()?;
+    Ok(state.store.lock().unwrap().insert(key, v).unwrap_or_default().to_string())
 }
 
 async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
@@ -81,117 +91,56 @@ async fn exec(state: Extension<Arc<State>>, req: Bytes) -> AppResult<String> {
     let mut store = Store::new(&state.engine, &state.store);
     store.add_fuel(1_000_000)?;
 
-    let host_log = Func::wrap(
-        &mut store,
-        |mut caller: Caller<'_, _>, ptr: u32, len: u32| {
-            let span = span!(Level::INFO, "host_log");
-            let _guard = span.enter();
-            event!(Level::DEBUG, "host_log({}, {})", ptr, len,);
-            let memory = match caller.get_export("memory") {
-                None => return 0,
-                Some(m) => m,
-            };
-            let memory = match memory.into_memory() {
-                None => return 0,
-                Some(m) => m,
-            };
-            let x = &memory.data(&caller)[ptr as usize..(ptr + len) as usize];
-            event!(Level::DEBUG, "{:?}", std::str::from_utf8(x));
-            1
-        },
-    );
-
     let host_get = Func::wrap(
         &mut store,
-        |mut caller: Caller<'_, &Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
-         key_ptr: u32,
-         key_len: u32,
-         value_ptr: u32,
-         value_len: u32| {
+        |caller: Caller<'_, &Mutex<BTreeMap<i32, i32>>>, key: i32| {
             let span = span!(Level::INFO, "host_get");
             let _guard = span.enter();
-            event!(
-                Level::DEBUG,
-                "host_get({}, {}, {}, {})",
-                key_ptr,
-                key_len,
-                value_ptr,
-                value_len
-            );
-            let memory = match caller.get_export("memory") {
-                None => return 0,
-                Some(m) => m,
-            };
-            let memory = match memory.into_memory() {
-                None => return 0,
-                Some(m) => m,
-            };
-
-            let key_range = key_ptr as usize..(key_ptr + key_len) as usize;
-            let key = &memory.data(&caller)[key_range];
-
-            let data = caller.data().lock().unwrap();
-            let value = match data.get(key) {
-                None => return 0,
-                Some(v) => v,
-            };
-            event!(Level::DEBUG, "{:?} = {:?}", key, value);
-
-            let value_range = value_ptr as usize..(value_ptr + value_len) as usize;
-            let dst = &mut memory.data_mut(&mut caller)[value_range];
-            value.as_slice().read(dst).unwrap() as u32
+            let value = caller
+                .data()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            event!(Level::DEBUG, "host_get({}) = {}", key, value);
+            value
         },
     );
 
     let host_set = Func::wrap(
         &mut store,
-        |mut caller: Caller<'_, &Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
-         key_ptr: u32,
-         key_len: u32,
-         value_ptr: u32,
-         value_len: u32| {
+        |caller: Caller<'_, &Mutex<BTreeMap<i32, i32>>>, key: i32, value: i32| {
             let span = span!(Level::INFO, "host_set");
             let _guard = span.enter();
-            event!(
-                Level::DEBUG,
-                "host_set({}, {}, {}, {})",
-                key_ptr,
-                key_len,
-                value_ptr,
-                value_len
-            );
-            let memory = match caller.get_export("memory") {
-                None => return 0,
-                Some(m) => m,
-            };
-            let memory = match memory.into_memory() {
-                None => return 0,
-                Some(m) => m,
-            };
-            let key_range = key_ptr as usize..(key_ptr + key_len) as usize;
-            let value_range = value_ptr as usize..(value_ptr + value_len) as usize;
-            let key = memory.data(&caller)[key_range].to_vec();
-            let value = memory.data(&caller)[value_range].to_vec();
-            event!(Level::DEBUG, "setting {:?} = {:?}", key, value);
-            caller.data().lock().unwrap().insert(key, value);
-            1
+            event!(Level::DEBUG, "host_set({}, {})", key, value,);
+            caller
+                .data()
+                .lock()
+                .unwrap()
+                .insert(key, value)
+                .unwrap_or_default()
         },
     );
 
-    let instance = Instance::new(
-        &mut store,
-        &module,
-        &[host_log.into(), host_get.into(), host_set.into()],
-    )?;
-    let add = instance.get_typed_func::<(i32, i32), i32, _>(&mut store, "add")?;
+    let mut imports = Vec::new();
+    for import in module.imports() {
+        match import.name() {
+            "host_get" => imports.push(host_get.into()),
+            "host_set" => imports.push(host_set.into()),
+            _ => {},
+        };
+    }
+    let instance = Instance::new(&mut store, &module, &imports)?;
+    let add = instance.get_typed_func::<(), i32, _>(&mut store, "exec")?;
 
     let output = {
         let span = span!(Level::INFO, "call");
         let _guard = span.enter();
-        add.call(&mut store, (3, 4))?
+        add.call(&mut store, ())?
     };
 
-    Ok(format!("3 + 4 = {}", output))
+    Ok(output.to_string())
 }
 
 enum AppError {
@@ -215,5 +164,15 @@ impl From<anyhow::Error> for AppError {
 impl From<wasmtime::Trap> for AppError {
     fn from(e: wasmtime::Trap) -> Self {
         AppError::Unknown(anyhow!("wasm trap: {}", e))
+    }
+}
+impl From<Utf8Error> for AppError {
+    fn from(e: Utf8Error) -> Self {
+        AppError::Unknown(e.into())
+    }
+}
+impl From<ParseIntError> for AppError {
+    fn from(e: ParseIntError) -> Self {
+        AppError::Unknown(e.into())
     }
 }
